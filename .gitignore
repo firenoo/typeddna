@@ -1,0 +1,9 @@
+#Scripts
+*.sh
+*.bat
+
+#Out
+/out/**
+
+#VSCode
+/.vscode/**
