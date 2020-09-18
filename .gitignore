@@ -4,6 +4,7 @@
 
 #Out
 /out/**
+test.*
 
 #VSCode
 /.vscode/**
