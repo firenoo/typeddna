@@ -3,6 +3,7 @@
 #include <fstream>
 #include <string>
 #include <memory>
+#include <vector>
 
 #define fn_UNIT_SIZE 16 //unit size, in bytes (8-bit units)
 #define fn_TYPEDDNA_ID 1
@@ -20,6 +21,7 @@
  * single bytes of data (8-bits, char).
  * 
  */
+
 class CharDna
 {
 private:
@@ -28,8 +30,6 @@ private:
     uint_fast64_t m_seed;
     uint_fast32_t m_ptr;
 protected:
-
-    
     void realloc(uint_fast32_t newLen)
     {
         if(newLen < m_ptr)
@@ -64,18 +64,20 @@ public:
         m_seed(seed),
         m_ptr(init_len)
     {
-        for(unsigned int i = 0; i < init_len; i++)
-        {
-            *(m_data + i) = *(src + i);
-        }
+        memcpy(m_data, src, init_len);
     }
+
+    CharDna(CharD)
     
     ~CharDna()
     {
         delete[] m_data;
     }
 
-    CharDna(const CharDna& other) = delete;
+    char operator[](uint_fast32_t offset)
+    {
+        return *(m_data + offset);
+    }
 
     /**
      * Sets the data at the offset to the specified char, allocating new space
@@ -148,7 +150,7 @@ private:
     }
 
 public:
-    explicit Int32Dna(const std::shared_ptr<CharDna> ptr) :
+    explicit Int32Dna(std::shared_ptr<CharDna> ptr) :
         m32_inst(ptr)
     {
     }
@@ -215,6 +217,7 @@ public:
         m64_inst(instance)
     {
     }
+    
 
     /**
      * Sets 4 bytes of data at the specified offset. The offset is measured in
@@ -255,6 +258,8 @@ public:
     }
 };
 
+class Gene;
+
 //Manages dna format
 class Ribosome32
 {
@@ -277,26 +282,26 @@ public:
 class Gene
 {
 private:
-    uint_fast32_t info;
-    uint_fast32_t data[4];
-    uint_fast32_t error;
+    uint_fast32_t m_info;
+    uint_fast32_t m_data[4];
+    uint_fast32_t m_error;
     unsigned char cur_geneCt, cur_slot;
 
     Gene* set_data(uint_fast32_t d1, uint_fast32_t d2, unsigned int mask, unsigned int slot)
     {
         //clear bits in slots
-        *(data + 2) &= ~mask << (slot * 8);
-        *(data + 3) &= ~mask << (slot * 8);
+        *(m_data + 2) &= ~mask << (slot * 8);
+        *(m_data + 3) &= ~mask << (slot * 8);
         //set data in slot
-        *(data + 2) |= (d1 & mask) << (slot * 8);
-        *(data + 3) |= (d2 & mask) << (slot * 8);
+        *(m_data + 2) |= (d1 & mask) << (slot * 8);
+        *(m_data + 3) |= (d2 & mask) << (slot * 8);
         return this;
     }
 public:
     Gene() :
-        info(0),
-        data{0, 0, 0, 0},
-        error(0),
+        m_info(0),
+        m_data{0, 0, 0, 0},
+        m_error(0),
         cur_geneCt(0)
     {
     }
@@ -308,19 +313,19 @@ public:
     /**
      * Whether an error occurred since the last operation.
      */
-    bool error()
+    bool errorBit()
     {
-        return error;
+        return m_error;
     }
 
     bool err_shuffle()
     {
-        return error & 0b1;
+        return m_error & 0b1;
     }
 
     bool err_override()
     {
-        return error & 0b10;
+        return m_error & 0b10;
     }
     
     /*
@@ -369,26 +374,14 @@ public:
         return this;
     }
 
-    uint_fast32_t get_info()
+    uint_fast32_t get_info() const
     {
-        return info;
+        return m_info;
     }
 
-    const uint_fast32_t* get_data()
+    const uint_fast32_t* get_data() const
     {
-        return const_cast<const uint_fast32_t*>(data);
-    }
-};
-
-struct dna_read
-{
-    const size_t size;
-    const CharDna** data;
-
-    dna_read(size_t size, const CharDna** d) :
-        size(size),
-        data(d)
-    {
+        return const_cast<const uint_fast32_t*>(m_data);
     }
 };
 
@@ -447,23 +440,21 @@ static uint_fast64_t read_int64(std::ifstream* stream)
     return result;
 }
 
+
 /**
  * Deserializes the dna objects in the file pointed to by the path.
  */
-static std::unique_ptr<dna_read> deserialize(const char* path)
+static int deserialize(const std::string& path, std::vector<CharDna>& vec)
 {
-    size_t s = 0;
-    CharDna** data = nullptr;
+    size_t size = 0;
     std::ifstream file;
     file.open(path, std::ios::binary);
     if(file.is_open())
     {
-        s = static_cast<size_t>(read_int32(&file));
-        data = new CharDna*[s];
+        size = static_cast<size_t>(read_int32(&file));
         uint_fast32_t dna_len;
         uint_fast64_t dna_seed;
-        char* dna_data = nullptr;
-        for(unsigned int i = 0; i < s; i++)
+        for(unsigned int i = 0; i < size; i++)
         {
 
             dna_len = read_int32(&file);
@@ -471,35 +462,37 @@ static std::unique_ptr<dna_read> deserialize(const char* path)
             {
                 //Error, cannot read the unit size.
                 file.close();
-                return nullptr;
+                return 0;
             }
             dna_seed = read_int64(&file);
             
             while(read_int32(&file) != '\n')
             {
-
+                //Skip header bytes that are not used in this impl.
             }
-            if(dna_data == nullptr || sizeof(dna_data) < dna_len)
+            char dna_data[dna_len];
+            char* ptr = &(dna_data[0]);
+            file.read(ptr, dna_len);
+            if(file.eof())
             {
-                dna_data[dna_len];
+                file.close();
+                return 0;
             }
-            file.read(dna_data, dna_len);
             if(!file.bad())
             {
-                *(data + i) = new CharDna(dna_seed, dna_len, const_cast<const char*>(dna_data));
+                vec.emplace_back(dna_seed, dna_len, ptr);
             }
-            
         }
+        file.close();
+        return 1;
     }
-    file.close();
-    std::unique_ptr<dna_read> result = std::make_unique<dna_read>(new dna_read(s, const_cast<const CharDna**>(data)));
-    return result;
+    return 0;
 }
 
 /**
  * Serializes the dna objects to the specified file path.
  */
-static void serialize(const char* path, std::initializer_list<CharDna*> list)
+static void serialize(const std::string& path, std::initializer_list<CharDna> list)
 {
     std::ofstream file;
     file.open(path, std::ios::binary | std::ios::trunc);
@@ -522,20 +515,33 @@ static void serialize(const char* path, std::initializer_list<CharDna*> list)
         file.flush();
     }
     file.close();
-
 }
 
 
 //Testing
 int main() {
-    CharDna dna(0, 16);
-    Long64Dna wrap64(std::make_shared<CharDna>(dna));
-    Int32Dna wrap32(std::make_shared<CharDna>(dna));
+    std::shared_ptr<CharDna> dptr = std::make_shared<CharDna>(0, 16);
+    Long64Dna wrap64(dptr);
+    Int32Dna wrap32(dptr);
     wrap32.append_int(0xff04);
     wrap64.append_long(0xffffffffffff11);
-    for(unsigned int i = 0; i < dna.capacity(); i++)
+    for(unsigned int i = 0; i < dptr->capacity(); i++)
     {
-        std::cout << (unsigned int)(dna.char_data(i) & 0xff) << '-';
+        std::cout << (unsigned int)(dptr->char_data(i) & 0xff) << '-';
+    }
+    std::cout <<std::endl;
+    serialize("test.bin", {dptr.get()});
+    std::vector<CharDna> result;
+    result.reserve(2);
+    if(deserialize("test.bin", result))
+    {
+        for(CharDna& d : result)
+        {
+            for(unsigned int i = 0; i < d.capacity(); i++)
+            {
+                std::cout << (unsigned int)(d.char_data(i) & 0xff) << '-';
+            }
+        }
     }
     std::cout <<std::endl;
     return 0;
