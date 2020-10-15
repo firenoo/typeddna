@@ -4,15 +4,15 @@
 #include <string>
 #include <memory>
 #include <vector>
+#include <type_traits>
 
 #define fn_UNIT_SIZE 16 //unit size, in bytes (8-bit units)
 #define fn_TYPEDDNA_ID 1
 
-#define fn_BYTE 0
-#define fn_SHORT 1
-#define fn_INT 2
-#define fn_LONG 3
-
+#define fn_BYTE 1
+#define fn_SHORT 2
+#define fn_INT 4
+#define fn_LONG 8
 //This file provides the classes for manipulating data on DNA, according to my
 //typed data format. Meant to be used in 8-bit byte machines.
 
@@ -67,7 +67,14 @@ public:
         memcpy(m_data, src, init_len);
     }
 
-    CharDna(CharD)
+    CharDna(const CharDna& other) :
+        m_data(new char[other.m_len]),
+        m_len(other.m_len),
+        m_seed(other.m_seed),
+        m_ptr(0)
+    {
+        memcpy(m_data, other.m_data, m_len);
+    }
     
     ~CharDna()
     {
@@ -279,15 +286,20 @@ public:
     }
 };
 
+#define errOVERRIDE 1
 class Gene
 {
 private:
-    uint_fast32_t m_info;
-    uint_fast32_t m_data[4];
+    //(0) header
+    //(1) data1 - chunks are always stored biggest to smallest.
+    //(2) data2
+    //(3) dominance
+    uint_fast64_t m_data[5];
     uint_fast32_t m_error;
-    unsigned char cur_geneCt, cur_slot;
+    //# of bytes, shorts, ints.
+    unsigned char m_slot;
 
-    Gene* set_data(uint_fast32_t d1, uint_fast32_t d2, unsigned int mask, unsigned int slot)
+    Gene* set_data(uint_fast64_t d1, uint_fast64_t d2, unsigned int mask, unsigned int slot)
     {
         //clear bits in slots
         *(m_data + 2) &= ~mask << (slot * 8);
@@ -297,86 +309,174 @@ private:
         *(m_data + 3) |= (d2 & mask) << (slot * 8);
         return this;
     }
+
 public:
     Gene() :
-        m_info(0),
-        m_data{0, 0, 0, 0},
+        m_data{0, 0, 0, 0, 0},
         m_error(0),
-        cur_geneCt(0)
+        m_slot(0)
     {
     }
 
-    ~Gene()
-    {
-    }
-
-    /**
+    /*
      * Whether an error occurred since the last operation.
      */
-    bool errorBit()
+    bool is_err()
     {
         return m_error;
     }
 
-    bool err_shuffle()
+    void clear_err()
     {
-        return m_error & 0b1;
+        m_error = 0;
+    }
+
+
+    /*
+     * Clears the specifed error bit(s). Argument is a bit field for which
+     * each set bit is cleared in the error bit.
+     */
+    void clear_err(uint_fast32_t bit)
+    {
+        m_error &= ~bit;
     }
 
     bool err_override()
     {
-        return m_error & 0b10;
+        return (m_error & errOVERRIDE);
     }
     
     /*
-     * Adds the data to the next available data slot. 
+     * Adds the 64-bit data to the next available data slot. On success, all
+     * error flags are cleared.
      * 
-     * Invariant:
-     *      The data blocks are always sorted from largest to smallest.
-     * d1 & d2  - the data blocks to add. For dominance data, see the method
-     *            append_dom(int32, int32, uint, bool).
+     * d1, d2   - the data blocks to add.
+     * force    - If there is not enough space in this gene, setting this to true will
+     *            allow the algorithm to override bits starting from the oldest entry. The
+     *            override flag is then set. Otherwise this method does nothing.
+     * Special case for 64-bit: If force is true, all bits are overriden; it is equivalent
+     * to calling clear_data() then calling this method. The override error flag is then set.
+     * Otherwise, this method does nothing.
+     */ 
+    Gene* append_64(uint_fast64_t d1, uint_fast64_t d2, char dom1, char dom2, bool force)
+    {
+        if(force)
+        {
+            clear_data();
+            m_error |= errOVERRIDE;   
+        } else if(m_slot != 0)
+        {
+            //Do nothing
+            return this;
+        }
+        m_data[1] = d1;
+        m_data[2] = d2;
+        m_data[3] |= dom1;
+        m_data[4] |= dom2;
+        m_slot = 8;
+    }
+
+    /*
+     * Adds the 32-bit data to the next available data slot. On success, all
+     * error flags are cleared.
+     * 
+     * d1, d2   - the data blocks to add.
+     * force    - If there is not enough space in this gene, setting this to true will
+     *            allow the algorithm to override bits starting from the oldest entry. The
+     *            override flag is then set. Otherwise this method does nothing and the override 
+     *            flag is set.
+     * There are up to 2 available slots for 32-bit data.
+     */ 
+    Gene* append_32(uint_fast32_t d1, uint_fast32_t d2, char dom1, char dom2, bool force)
+    {
+        char index;
+        if(m_slot > 4 && !force)
+        {
+            m_error |= 1;
+            return this;
+        } else if(m_slot > 4)
+        {
+            m_slot = 4;
+            index = 32;
+            m_data[1] &= 0xffffffff;
+            m_data[2] &= 0xffffffff;
+            m_error |= errOVERRIDE;
+            m_data[3] &= 0xff << m_slot * 8;
+            m_data[4] &= 0xff << m_slot * 8;
+        } else
+        {
+            index = m_slot * 8;
+        }
+        
+        m_data[1] |= d1 << index;
+        m_data[2] |= d2 << index;
+        m_data[3] |= dom1 << index;
+        m_data[4] |= dom2 << index;
+        m_slot += 4;
+    }
+
+   /*
+     * Adds the 16-bit data to the next available data slot. On success, all
+     * error flags are cleared.
+     * 
+     * d1, d2   - the data blocks to add.
+     * force    - If there is not enough space in this gene, setting this to true will
+     *            allow the algorithm to override bits starting from the oldest entry. The
+     *            override flag is then set. Otherwise this method does nothing and the override 
+     *            flag is set.
+     * There are up to 4 available slots for 16-bit data.
+     */ 
+    Gene* append_32(uint_fast32_t d1, uint_fast32_t d2, char dom1, char dom2, bool force)
+    {
+        char index;
+        if(m_slot > 6 && !force)
+        {
+            m_error |= 1;
+            return this;
+        } else if(m_slot > 4)
+        {
+            m_slot = 4;
+            index = 48;
+            m_data[1] &= 0xffffffff;
+            m_data[2] &= 0xffffffff;
+            m_error |= errOVERRIDE;
+            m_data[3] &= 0xff << m_slot * 8;
+            m_data[4] &= 0xff << m_slot * 8;
+        } else
+        {
+            index = m_slot * 8;
+        }
+        
+        m_data[1] |= d1 << index;
+        m_data[2] |= d2 << index;
+        m_data[3] |= dom1 << index;
+        m_data[4] |= dom2 << index;
+        m_slot += 4;
+    }
+    /*
+     * Adds the 8-bit data to the next available data slot.
+     * 
+     * d1, d2   - the data blocks to add.
      * type     - type. Use the defined macros, fn_BYTE, fn_SHORT, etc. Invalid
      *            values are treated as fn_BYTE.
-     * safeMode - if this is set to false, the following operations are
-     *            performed under the hood if there are no data slots;
-     *            if the operation fails, the next one is attempted.
-     *            1. Shuffling: Data is moved around to make room. The
-     *               shuffling error bit is set. This also affects the
-     *               dominance bits. The info bits are adjusted.
-     *            2. Overriding: Data is overridden. The overriding error
-     *               bit is set, as well as the bits that were overriden.
-     *            If set to true, the method will do nothing if there are no
-     *            data slots.
+     *            If there is not enough room, 
      */ 
-    Gene* append_data(uint_fast32_t d1, uint_fast32_t d2, unsigned int type, bool safeMode)
+    Gene* append_8(uint_fast32_t d1, uint_fast32_t d2, char dom1, char dom2)
     {
-
-        switch(type)
-        {
-            //16-bit
-            case fn_SHORT:
-                if(cur_slot)
-                {
-                    
-                }
-                break;
-            case fn_INT:
-                if(cur_slot == 0)
-                {
-
-                }
-                break;
-            case fn_LONG:
-                break;
-            default:
-                break;
-        }
+        
+        
         return this;
     }
 
-    uint_fast32_t get_info() const
+
+
+    Gene* clear_data()
     {
-        return m_info;
+        m_slot = 0;
+        m_data[1] = 0;
+        m_data[2] = 0;
+        m_data[3] = 0;
+        return this;
     }
 
     const uint_fast32_t* get_data() const
@@ -443,6 +543,7 @@ static uint_fast64_t read_int64(std::ifstream* stream)
 
 /**
  * Deserializes the dna objects in the file pointed to by the path.
+ * Inserts all deserialized dna objects into the supplied std::vector.
  */
 static int deserialize(const std::string& path, std::vector<CharDna>& vec)
 {
@@ -492,7 +593,7 @@ static int deserialize(const std::string& path, std::vector<CharDna>& vec)
 /**
  * Serializes the dna objects to the specified file path.
  */
-static void serialize(const std::string& path, std::initializer_list<CharDna> list)
+static void serialize(const std::string& path, std::initializer_list<CharDna*> list)
 {
     std::ofstream file;
     file.open(path, std::ios::binary | std::ios::trunc);
@@ -502,7 +603,7 @@ static void serialize(const std::string& path, std::initializer_list<CharDna> li
         //Ensure endianness is constant
         write_int32(&file, s);
         uint_fast32_t dna_len;
-        for(CharDna* d : list) 
+        for(const CharDna* d : list) 
         {
             dna_len = d->len();
             write_int32(&file, dna_len); //size
